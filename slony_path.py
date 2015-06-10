@@ -34,7 +34,7 @@ def path_exists(cursor, cluster_name, server_id, client_id):
     cursor.execute(query, (int(server_id), int(client_id)))
     return cursor.rowcount == 1
 
-# NB: this one creates two paths at once for the sake of sanity. If really necessary we can look into
+# NB: this one creates TWO paths at once for the sake of sanity. If really necessary we can look into
 # decoupling this into two separate calls
 def store_path(module, cluster_name, master_conninfo, slave_conninfo, server_id, client_id):
     cmd = """
@@ -54,21 +54,19 @@ _EOF_
 
     return module.run_command(cmd, use_unsafe_shell=True)
 
-# BUGBUG: this doesn't pass for now as slonik hangs indefinitely waiting for event to be confirmed on master node
-def drop_path(module, cluster_name, master_conninfo, slave_conninfo, server_id, client_id):
+# Drops ONE path at a time
+def drop_path(module, cluster_name, master_conninfo, slave_conninfo, master_node_id, slave_node_id, server_id, client_id):
     cmd = """
     slonik <<_EOF_
     cluster name = %s;
     node %s admin conninfo='%s';
     node %s admin conninfo='%s';
     drop path (server=%s, client=%s);
-    drop path (server=%s, client=%s);
 _EOF_
     """ % (cluster_name,
-           server_id, master_conninfo,
-           client_id, slave_conninfo,
+           master_node_id, master_conninfo,
+           slave_node_id, slave_conninfo,
            server_id, client_id,
-           client_id, server_id,
            )
     return module.run_command(cmd, use_unsafe_shell=True)
 
@@ -148,9 +146,12 @@ def main():
 
     elif state == "absent":
         if path_is_present:
-            (rc, out, err) = drop_path(module, cluster_name, master_conninfo, slave_conninfo, server_id, client_id)
+            # drop both paths. This can't be done in a single slonik operation without locking up the
+            # tool
+            (rc1, out, err) = drop_path(module, cluster_name, master_conninfo, slave_conninfo, server_id, client_id, server_id, client_id)
+            (rc2, out, err) = drop_path(module, cluster_name, master_conninfo, slave_conninfo, server_id, client_id, client_id, server_id)
             result['changed'] = True
-            if rc != 0:
+            if rc1 != 0 and rc2 != 0:
                 module.fail_json(stdout=out,msg=err, rc=rc)
         else:
             result['changed'] = False
