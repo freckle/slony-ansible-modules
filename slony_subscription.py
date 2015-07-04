@@ -136,17 +136,9 @@ def main():
 
     result = {}
 
-    # The order of server_id and client_is is very important here, don't mess it up
-    # Master must see slave as server on master's schema
-    # Slave must see master as server on slave's schema
-    sub_is_present_on_master = subscription_exists(master_cursor, cluster_name, set_id, provider_id, receiver_id)
-    sub_is_present_on_slave = subscription_exists(slave_cursor, cluster_name, set_id, provider_id, receiver_id)
-    sub_is_present = sub_is_present_on_master and sub_is_present_on_slave
+    sub_is_present = subscription_exists(master_cursor, cluster_name, set_id, provider_id, receiver_id)
 
-    if sub_is_present_on_master != sub_is_present_on_slave:
-        module.fail_json(msg="Subscription is configured on only part of the cluster. Cluster config is in a broken state")
-
-    elif state == "absent":
+    if state == "absent":
         if sub_is_present:
             (rc, out, err) = unsubscribe_set(module, cluster_name, master_conninfo, slave_conninfo, set_id, provider_id, receiver_id)
             result['changed'] = True
