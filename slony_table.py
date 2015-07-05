@@ -144,7 +144,6 @@ def main():
             receiver_id     = dict(required=True),
             tables          = dict(required=True, type='list'),
             sequences       = dict(required=False, type='list'),
-            state           = dict(default="present", choices=["absent", "present"]),
         ),
         supports_check_mode = False
     )
@@ -165,7 +164,6 @@ def main():
     receiver_id      = module.params["receiver_id"]
     tables           = module.params["tables"]
     sequences        = module.params["sequences"]
-    state            = module.params["state"]
 
     changed          = False
 
@@ -206,89 +204,87 @@ def main():
     arg_sequence_ids = frozenset(map(lambda x: x['id'], sequences))
 
     result = {}
+    result['changed'] = False
 
-    # the trick with absent is making sure the tables with given fully qualified and id
-    # are no longer present in the database for given set id.
-    # It's possible the same tables exist with a different id, so it's not super
-    # obvious what to do in that case
-    if state == "absent":
-        raise Exception('Not yet implemented')
-        # table_is_present = table_exists(cursor, cluster_name, set_id, table_id)
-        # if table_is_present:
-        #     (rc, out, err) = drop_table(module, host, db, replication_user, cluster_name, password, port, origin_id, table_id)
-        #     result['changed'] = True
-        #     if rc != 0:
-        #         module.fail_json(stdout=out,msg=err, rc=rc)
-        # else:
-        #     result['changed'] = False
+    #
+    # Take care of removing tables from replication set that are no longer in the config
+    #
+    table_ids_to_remove = present_table_ids - arg_table_ids
+    sequence_ids_to_remove = present_sequence_ids - arg_sequence_ids
 
-    # we have two cases here: either tables are being added to a set that
-    # doesn't have subscribers yet, OR tables are being added to an already
-    # subscribed-to set, in which case we have to follow a special merge sets
-    # flow
-    if state == "present":
-        sis = set_is_subscribed(master_cursor, cluster_name, set_id)
+    # drop no longer replicated tables from the set
+    for tid in table_ids_to_remove:
+            (rc, out, err) = drop_table(module, master_host, master_db, replication_user, cluster_name, password, port, origin_id, tid)
+            result['changed'] = True
+            if rc != 0:
+                module.fail_json(stdout=out,msg=err, rc=rc)
 
-        # TODO: what if arg ids is a subset of present ids?
-        new_table_ids = arg_table_ids - present_table_ids
-        new_sequence_ids = arg_sequence_ids - present_sequence_ids
+    # droip no longer replicated sequences from the set
+    for sid in sequence_ids_to_remove:
+            (rc, out, err) = drop_sequence(module, master_host, master_db, replication_user, cluster_name, password, port, origin_id, sid)
+            result['changed'] = True
+            if rc != 0:
+                module.fail_json(stdout=out,msg=err, rc=rc)
 
-        must_add = len(new_table_ids) > 0 or len(new_sequence_ids) > 0
+    #
+    # Take care of adding new tables to the replication set
+    #
+    sis = set_is_subscribed(master_cursor, cluster_name, set_id)
 
-        if sis and must_add:
-            #
-            # merge into existing subscription
-            #
-            new_tables = [table for tid in new_table_ids for table in tables if tid == table['id']]
-            new_sequences = [sequence for sid in new_sequence_ids for sequence in sequences if sid == sequence['id']]
+    # TODO: what if arg ids is a subset of present ids?
+    new_table_ids = arg_table_ids - present_table_ids
+    new_sequence_ids = arg_sequence_ids - present_sequence_ids
+    must_add = len(new_table_ids) > 0 or len(new_sequence_ids) > 0
+    if sis and must_add:
+        #
+        # merge into existing subscription
+        #
+        new_tables = [table for tid in new_table_ids for table in tables if tid == table['id']]
+        new_sequences = [sequence for sid in new_sequence_ids for sequence in sequences if sid == sequence['id']]
 
-            (rc, out, err) = merge_tables_seqs(module, master_conninfo, slave_conninfo, cluster_name, set_id, origin_id, origin_id, receiver_id, new_tables, new_sequences)
+        (rc, out, err) = merge_tables_seqs(module, master_conninfo, slave_conninfo, cluster_name, set_id, origin_id, origin_id, receiver_id, new_tables, new_sequences)
+        if rc != 0:
+            module.fail_json(stdout=out, msg=err, rc=rc)
+    elif must_add:
+        #
+        # add to set, no existing subscription
+        #
+        for tid in new_table_ids:
+            table = next(t for t in tables if t['id'] == tid)
+            (rc, out, err) = create_table(
+                    module,
+                    master_host,
+                    master_db,
+                    replication_user,
+                    cluster_name,
+                    password,
+                    port,
+                    set_id,
+                    origin_id,
+                    table['id'],
+                    table['fqname'],
+                    table['comment'])
             if rc != 0:
                 module.fail_json(stdout=out, msg=err, rc=rc)
-        elif must_add:
-            #
-            # add to set, no existing subscription
-            #
-            for tid in new_table_ids:
-                table = next(t for t in tables if t['id'] == tid)
-                (rc, out, err) = create_table(
-                        module,
-                        master_host,
-                        master_db,
-                        replication_user,
-                        cluster_name,
-                        password,
-                        port,
-                        set_id,
-                        origin_id,
-                        table['id'],
-                        table['fqname'],
-                        table['comment'])
-                if rc != 0:
-                    module.fail_json(stdout=out, msg=err, rc=rc)
-            for sid in new_sequence_ids:
-                sequence = next(s for s in sequences if s['id'] == sid)
-                (rc, out, err) = create_sequence(
-                        module,
-                        master_host,
-                        master_db,
-                        replication_user,
-                        cluster_name,
-                        password,
-                        port,
-                        set_id,
-                        origin_id,
-                        sequence['id'],
-                        sequence['fqname'],
-                        sequence['comment'])
-                if rc != 0:
-                    module.fail_json(stdout=out, msg=err, rc=rc)
+        for sid in new_sequence_ids:
+            sequence = next(s for s in sequences if s['id'] == sid)
+            (rc, out, err) = create_sequence(
+                    module,
+                    master_host,
+                    master_db,
+                    replication_user,
+                    cluster_name,
+                    password,
+                    port,
+                    set_id,
+                    origin_id,
+                    sequence['id'],
+                    sequence['fqname'],
+                    sequence['comment'])
+            if rc != 0:
+                module.fail_json(stdout=out, msg=err, rc=rc)
 
-            result['changed'] = True
-        else:
-            # nothing to add
-            result['changed'] = False
-
+        result['changed'] = True
 
     module.exit_json(**result)
 
