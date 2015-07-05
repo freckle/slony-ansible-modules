@@ -17,6 +17,8 @@ EXAMPLES = '''
 - slony_table: name=TODO
 '''
 
+import jinja2
+
 try:
     import psycopg2
     import psycopg2.extras
@@ -28,12 +30,6 @@ else:
 # ===========================================
 # Postgres / slonik support methods.
 #
-
-# Don't SQL inject yourself
-# def table_exists(cursor, cluster_name, set_id, table_id):
-#     query = "SELECT 1 FROM _{0}.sl_table WHERE tab_id = %s AND tab_set = %s".format(cluster_name)
-#     cursor.execute(query, (int(table_id), int(set_id)))
-#     return cursor.rowcount == 1
 
 def set_is_subscribed(cursor, cluster_name, set_id):
     query = "SELECT 1 FROM _{0}.sl_subscribe WHERE sub_set = %s".format(cluster_name)
@@ -76,14 +72,6 @@ _EOF_
 
     return module.run_command(cmd, use_unsafe_shell=True)
 
-# Don't SQL inject yourself
-def sequence_exists(cursor, cluster_name, set_id, sequence_id):
-    query = """SELECT 1 FROM _{0}.sl_sequence
-               WHERE seq_id = %s
-               AND seq_set = %s""".format(cluster_name)
-    cursor.execute(query, (int(sequence_id), int(set_id)))
-    return cursor.rowcount == 1
-
 def create_sequence(module, host, db, replication_user, cluster_name, password, port, set_id, origin_id, sequence_id, fqname, comment):
     cmd = """
     slonik <<_EOF_
@@ -106,6 +94,36 @@ _EOF_
 
     return module.run_command(cmd, use_unsafe_shell=True)
 
+# merge new tables tables and sequences into existing replication set
+def merge_tables_seqs(module, master_conninfo, slave_conninfo, cluster_name, set_id, origin_id, provider_id, receiver_id, new_tables, new_sequences):
+    cmd = """
+    slonik <<_EOF_
+    cluster name = {{ cluster_name }};
+    node {{ origin_id }} admin conninfo='{{ master_conninfo }}';
+    node {{ receiver_id }} admin conninfo='{{ slave_conninfo }}';
+    create set (id = 99, origin = {{ origin_id }}, comment='temporary replication set to be merged');
+    {% for sequence in sequences %}
+    set add sequence (set id=99, origin={{ origin_id }}, id={{ sequence.id }}, fully qualified name = '{{ sequence.fqname }}', comment='{{ sequence.comment }}');
+    {% endfor %}
+    {% for table in tables %}
+    set add table (set id=99, origin={{ origin_id }}, id={{ table.id }}, fully qualified name = '{{ table.fqname }}', comment='{{ table.comment }}');
+    {% endfor %}
+    subscribe set(id=99, provider={{ provider_id }}, receiver={{ receiver_id }});
+    merge set(id={{ set_id }}, add id=99, origin={{ origin_id }});
+_EOF_"""
+    template = jinja2.Template(cmd)
+    rendered = template.render(cluster_name=cluster_name,
+                               master_conninfo=master_conninfo,
+                               slave_conninfo=slave_conninfo,
+                               origin_id=origin_id,
+                               provider_id=provider_id,
+                               receiver_id=receiver_id,
+                               set_id=set_id,
+                               sequences=new_sequences,
+                               tables=new_tables)
+    return module.run_command(rendered, use_unsafe_shell=True)
+
+
 # ===========================================
 # Module execution.
 #
@@ -113,17 +131,20 @@ _EOF_
 def main():
     module = AnsibleModule(
         argument_spec=dict(
-            port            =dict(default="5432"),
-            cluster_name    =dict(default="replication"),
-            replication_user=dict(default="postgres"),
-            password        =dict(default=""),
-            db              =dict(required=True),
-            host            =dict(required=True),
-            set_id          =dict(required=True),
-            origin_id       =dict(required=True),
-            tables          =dict(required=True, type='list'),
-            sequences       =dict(required=False, type='list'),
-            state           =dict(default="present", choices=["absent", "present"]),
+            port            = dict(default="5432"),
+            cluster_name    = dict(default="replication"),
+            replication_user= dict(default="postgres"),
+            password        = dict(default=""),
+            master_db       = dict(required=True),
+            master_host     = dict(required=True),
+            slave_db        = dict(required=True),
+            slave_host      = dict(required=True),
+            set_id          = dict(required=True),
+            origin_id       = dict(required=True),
+            receiver_id     = dict(required=True),
+            tables          = dict(required=True, type='list'),
+            sequences       = dict(required=False, type='list'),
+            state           = dict(default="present", choices=["absent", "present"]),
         ),
         supports_check_mode = False
     )
@@ -135,15 +156,21 @@ def main():
     cluster_name     = module.params["cluster_name"]
     replication_user = module.params["replication_user"]
     password         = module.params["password"]
-    db               = module.params["db"]
-    host             = module.params["host"]
+    master_db        = module.params["master_db"]
+    master_host      = module.params["master_host"]
+    slave_db         = module.params["slave_db"]
+    slave_host       = module.params["slave_host"]
     set_id           = module.params["set_id"]
-    origin_id        = module.params["set_id"]
+    origin_id        = module.params["origin_id"]
+    receiver_id      = module.params["receiver_id"]
     tables           = module.params["tables"]
     sequences        = module.params["sequences"]
     state            = module.params["state"]
 
     changed          = False
+
+    master_conninfo  = "host=%s dbname=%s user=%s port=%s password=%s" % (master_host, master_db, replication_user, port, password)
+    slave_conninfo   = "host=%s dbname=%s user=%s port=%s password=%s" % (slave_host, slave_db, replication_user, port, password)
 
     # To use defaults values, keyword arguments must be absent, so
     # check which values are empty and don't include in the **kw
@@ -159,19 +186,16 @@ def main():
     try:
         # TODO: this probably gets overwritten by contents of kw which can lead
         # to a total poopshow
-        db_connection_master = psycopg2.connect(
-                database=db,
-                host=host,
-                user=replication_user,
-                **kw)
-        cursor = db_connection_master.cursor(
-                cursor_factory=psycopg2.extras.DictCursor)
+        db_connection_master = psycopg2.connect(master_conninfo)
+        db_connection_slave  = psycopg2.connect(slave_conninfo)
+        master_cursor        = db_connection_master.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        slave_cursor         = db_connection_slave.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
     except Exception, e:
         module.fail_json(msg="unable to connect to database: %s" % e)
 
-    present_tables = replicated_tables(cursor, cluster_name, set_id)
-    present_sequences = replicated_tables(cursor, cluster_name, set_id)
+    present_tables = replicated_tables(master_cursor, cluster_name, set_id)
+    present_sequences = replicated_tables(master_cursor, cluster_name, set_id)
 
     present_table_ids = frozenset(map(lambda x: x[0], present_tables))
     present_sequence_ids = frozenset(map(lambda x: x[0], present_sequences))
@@ -183,7 +207,7 @@ def main():
 
     result = {}
 
-    # the trick with absent is making sure the tables with given fqid name and id
+    # the trick with absent is making sure the tables with given fully qualified and id
     # are no longer present in the database for given set id.
     # It's possible the same tables exist with a different id, so it's not super
     # obvious what to do in that case
@@ -203,7 +227,7 @@ def main():
     # subscribed-to set, in which case we have to follow a special merge sets
     # flow
     if state == "present":
-        sis = set_is_subscribed(cursor, cluster_name, set_id)
+        sis = set_is_subscribed(master_cursor, cluster_name, set_id)
 
         # TODO: what if arg ids is a subset of present ids?
         new_table_ids = arg_table_ids - present_table_ids
@@ -212,16 +236,25 @@ def main():
         must_add = len(new_table_ids) > 0 or len(new_sequence_ids) > 0
 
         if sis and must_add:
+            #
             # merge into existing subscription
-            raise Exception('Not yet implemented')
+            #
+            new_tables = [table for tid in new_table_ids for table in tables if tid == table['id']]
+            new_sequences = [sequence for sid in new_sequence_ids for sequence in sequences if sid == sequence['id']]
+
+            (rc, out, err) = merge_tables_seqs(module, master_conninfo, slave_conninfo, cluster_name, set_id, origin_id, origin_id, receiver_id, new_tables, new_sequences)
+            if rc != 0:
+                module.fail_json(stdout=out, msg=err, rc=rc)
         elif must_add:
+            #
             # add to set, no existing subscription
+            #
             for tid in new_table_ids:
                 table = next(t for t in tables if t['id'] == tid)
                 (rc, out, err) = create_table(
                         module,
-                        host,
-                        db,
+                        master_host,
+                        master_db,
                         replication_user,
                         cluster_name,
                         password,
@@ -237,8 +270,8 @@ def main():
                 sequence = next(s for s in sequences if s['id'] == sid)
                 (rc, out, err) = create_sequence(
                         module,
-                        host,
-                        db,
+                        master_host,
+                        master_db,
                         replication_user,
                         cluster_name,
                         password,
