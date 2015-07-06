@@ -193,7 +193,7 @@ def main():
         module.fail_json(msg="unable to connect to database: %s" % e)
 
     present_tables = replicated_tables(master_cursor, cluster_name, set_id)
-    present_sequences = replicated_tables(master_cursor, cluster_name, set_id)
+    present_sequences = replicated_sequences(master_cursor, cluster_name, set_id)
 
     present_table_ids = frozenset(map(lambda x: x[0], present_tables))
     present_sequence_ids = frozenset(map(lambda x: x[0], present_sequences))
