@@ -6,10 +6,10 @@ DOCUMENTATION = '''
 module: slony_table
 author: Alexandr Kurilin
 version_added: "1.9"
-short_description: Create / delete a slony table in a set
-requirements: [psycopg2, slonik]
+short_description: Add or drop tables and sequences from/to a slony replication set
+requirements: [psycopg2, slonik, jinja2]
 description:
-    - Manage a Slony-I table in a set
+    - Adds or removes Slony-I tables and sequences in a replication set
 '''
 
 EXAMPLES = '''
