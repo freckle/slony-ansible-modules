@@ -185,12 +185,24 @@ def main():
         # TODO: this probably gets overwritten by contents of kw which can lead
         # to a total poopshow
         db_connection_master = psycopg2.connect(master_conninfo)
-        db_connection_slave  = psycopg2.connect(slave_conninfo)
         master_cursor        = db_connection_master.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        slave_cursor         = db_connection_slave.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
     except Exception, e:
         module.fail_json(msg="unable to connect to database: %s" % e)
+
+    # NB: a connection to the slave node isn't required for most of this
+    # module's operations. It is only necessary in the already-subscribed
+    # set merge scenario. In other cases, we can ignore this connection failing
+    # to be established.
+    try:
+        db_connection_slave  = psycopg2.connect(slave_conninfo)
+        slave_cursor         = db_connection_slave.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        slave_reachable = True
+    except Exception, e:
+        slave_reachable = False
+
+
+
 
     present_tables = replicated_tables(master_cursor, cluster_name, set_id)
     present_sequences = replicated_sequences(master_cursor, cluster_name, set_id)
@@ -236,6 +248,13 @@ def main():
     new_sequence_ids = arg_sequence_ids - present_sequence_ids
     must_add = len(new_table_ids) > 0 or len(new_sequence_ids) > 0
     if sis and must_add:
+
+        # fail in the case where the slave is unreachable and we need to update
+        # a currently subscribed set, which requires slonik to run against
+        # all of the participating nodes
+        if not slave_reachable:
+            module.fail_json(msg="Cannot merge sets if the slave is unreachable")
+
         #
         # merge into existing subscription
         #
