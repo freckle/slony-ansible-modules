@@ -282,7 +282,7 @@ def main():
                     origin_id,
                     table['id'],
                     table['fqname'],
-                    table['comment'])
+                    table.setdefault('comment', ''))
             if rc != 0:
                 module.fail_json(stdout=out, msg=err, rc=rc)
         for sid in new_sequence_ids:
@@ -299,7 +299,7 @@ def main():
                     origin_id,
                     sequence['id'],
                     sequence['fqname'],
-                    sequence['comment'])
+                    sequence.setdefault('comment', ''))
             if rc != 0:
                 module.fail_json(stdout=out, msg=err, rc=rc)
 
