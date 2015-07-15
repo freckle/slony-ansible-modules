@@ -231,7 +231,7 @@ def main():
             if rc != 0:
                 module.fail_json(stdout=out,msg=err, rc=rc)
 
-    # droip no longer replicated sequences from the set
+    # drop no longer replicated sequences from the set
     for sid in sequence_ids_to_remove:
             (rc, out, err) = drop_sequence(module, master_host, master_db, replication_user, cluster_name, password, port, origin_id, sid)
             result['changed'] = True
@@ -264,6 +264,9 @@ def main():
         (rc, out, err) = merge_tables_seqs(module, master_conninfo, slave_conninfo, cluster_name, set_id, origin_id, origin_id, receiver_id, new_tables, new_sequences)
         if rc != 0:
             module.fail_json(stdout=out, msg=err, rc=rc)
+
+        result['changed'] = True
+
     elif must_add:
         #
         # add to set, no existing subscription

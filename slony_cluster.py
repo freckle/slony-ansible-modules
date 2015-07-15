@@ -40,6 +40,8 @@ def schema_exists(cursor, cluster_name):
     cursor.execute(query, {'schema': "_" + cluster_name})
     return cursor.rowcount == 1
 
+# TODO: this should do drop node first, wait and then proceed with uninstall
+# but it's not working for some reason, investigate
 def remove_cluster(module, host, db, replication_user, cluster_name, password, port):
     cmd = """
     slonik <<_EOF_
